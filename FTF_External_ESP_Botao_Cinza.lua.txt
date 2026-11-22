@@ -1,0 +1,764 @@
+--[[
+    FTF External ESP - Botão circular cinza
+    Recursos:
+      1. ESP Player
+      2. GetUp Timer
+      3. Beast Spawn Timer
+      4. ESP Computer
+      5. ESP Door
+      6. ESP ExitDoor
+      7. Door Open Timer/Progress
+      8. Computer Progress
+
+    Todos os ESPs usam azul-claro com transparência moderada.
+    O botão é circular, cinza e fica aproximadamente na posição marcada na imagem.
+    Observação: a posição exata do botão pode variar conforme a escala/topbar
+    do Roblox e o dispositivo.
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
+if not LocalPlayer then
+    return
+end
+
+-- Evita duplicar a interface ao executar novamente.
+local GUI_NAME = "FTF_External_Toggle"
+local oldGui = CoreGui:FindFirstChild(GUI_NAME)
+if oldGui then
+    oldGui:Destroy()
+end
+
+-- Paleta padrão extraída das configurações Highlights do Eclipse.
+local COLORS = {
+    SurvivorFill = Color3.fromRGB(0, 255, 0),
+    SurvivorOutline = Color3.fromRGB(127, 255, 127),
+    BeastFill = Color3.fromRGB(255, 0, 0),
+    BeastOutline = Color3.fromRGB(255, 127, 127),
+    ComputerFill = Color3.fromRGB(13, 105, 172),
+    ComputerOutline = Color3.fromRGB(20, 165, 255),
+    DoorOpenFill = Color3.fromRGB(0, 255, 0),
+    DoorCloseFill = Color3.fromRGB(255, 0, 0),
+    DoorOutline = Color3.fromRGB(0, 0, 0),
+    ExitFill = Color3.fromRGB(252, 255, 100),
+    ExitOutline = Color3.fromRGB(255, 255, 160),
+}
+local FILL_TRANSPARENCY = 0.5
+local OUTLINE_TRANSPARENCY = 0
+local TEXT_TRANSPARENCY = 0
+
+local enabled = false
+local destroyed = false
+local updateConnection
+local playerAddedConnection
+local playerRemovingConnection
+local descendantAddedConnection
+local characterConnections = {}
+
+local highlights = {}
+local playerLabels = {}
+local getUpLabels = {}
+local objectLabels = {}
+local computerData = {}
+local doorData = {}
+
+local beastSpawnLabel
+local lastLocalPosition
+local beastSpawnActive = false
+local beastSpawnTime = 0
+local beastSpawnMessageUntil = 0
+
+local function safeDestroy(instance)
+    if instance and instance.Parent then
+        pcall(function()
+            instance:Destroy()
+        end)
+    end
+end
+
+local function getGuiParent()
+    local ok, hui = pcall(function()
+        if typeof(gethui) == "function" then
+            return gethui()
+        end
+        return nil
+    end)
+    if ok and hui then
+        return hui
+    end
+    return CoreGui
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = GUI_NAME
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.DisplayOrder = 1000000
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = getGuiParent()
+
+-- Botão circular cinza, posicionado aproximadamente na região marcada
+-- na imagem de referência. Ajuste os offsets se a escala da tela mudar.
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "FTF_External_ToggleButton"
+toggleButton.AnchorPoint = Vector2.new(0, 0)
+toggleButton.Position = UDim2.fromOffset(190, 185)
+toggleButton.Size = UDim2.fromOffset(58, 58)
+toggleButton.BackgroundColor3 = Color3.fromRGB(105, 105, 105)
+toggleButton.BackgroundTransparency = 0.12
+toggleButton.BorderSizePixel = 0
+toggleButton.Text = "ESP"
+toggleButton.TextColor3 = Color3.fromRGB(245, 245, 245)
+toggleButton.TextTransparency = 0
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.TextSize = 13
+toggleButton.AutoButtonColor = true
+toggleButton.Active = true
+toggleButton.Selectable = false
+toggleButton.ZIndex = 1000
+toggleButton.Parent = screenGui
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(1, 0)
+toggleCorner.Parent = toggleButton
+
+local toggleStroke = Instance.new("UIStroke")
+toggleStroke.Color = Color3.fromRGB(175, 175, 175)
+toggleStroke.Thickness = 1.5
+toggleStroke.Transparency = 0.2
+toggleStroke.Parent = toggleButton
+
+local function makeHighlight(target, fillColor, outlineColor, fillTransparency, outlineTransparency)
+    if not target or not target.Parent then
+        return
+    end
+
+    local h = highlights[target]
+    if not h or not h.Parent then
+        h = Instance.new("Highlight")
+        h.Name = "FTF_External_ESP"
+        h.Adornee = target
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Parent = target
+        highlights[target] = h
+    end
+
+    h.FillColor = fillColor or COLORS.ComputerFill
+    h.OutlineColor = outlineColor or COLORS.ComputerOutline
+    h.FillTransparency = fillTransparency == nil and FILL_TRANSPARENCY or fillTransparency
+    h.OutlineTransparency = outlineTransparency == nil and OUTLINE_TRANSPARENCY or outlineTransparency
+    return h
+end
+
+local function makeBillboard(parent, name, width, height, offsetY)
+    if not parent then
+        return nil
+    end
+
+    local old = parent:FindFirstChild(name)
+    if old then
+        old:Destroy()
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = name
+    billboard.Size = UDim2.fromOffset(width, height)
+    billboard.StudsOffset = Vector3.new(0, offsetY or 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.LightInfluence = 0
+    billboard.MaxDistance = 1500
+    billboard.Parent = parent
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Text"
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = COLORS.SurvivorFill
+    label.TextTransparency = TEXT_TRANSPARENCY
+    label.TextStrokeColor3 = Color3.fromRGB(5, 20, 35)
+    label.TextStrokeTransparency = 0.25
+    label.Font = Enum.Font.GothamBold
+    label.TextScaled = true
+    label.Text = ""
+    label.Parent = billboard
+
+    return billboard, label
+end
+
+local function getCharacterHead(player)
+    local character = player and player.Character
+    return character and character:FindFirstChild("Head")
+end
+
+local function removePlayerVisuals(player)
+    local character = player and player.Character
+    if character then
+        local h = highlights[character]
+        safeDestroy(h)
+        highlights[character] = nil
+    end
+
+    safeDestroy(playerLabels[player])
+    playerLabels[player] = nil
+    safeDestroy(getUpLabels[player])
+    getUpLabels[player] = nil
+end
+
+local function addPlayerVisuals(player)
+    if not enabled or player == LocalPlayer then
+        return
+    end
+
+    local character = player.Character
+    if not character then
+        return
+    end
+
+    local stats = player:FindFirstChild("TempPlayerStatsModule")
+    local beastValue = stats and stats:FindFirstChild("IsBeast")
+    local isBeast = beastValue and beastValue.Value == true
+    if isBeast then
+        makeHighlight(character, COLORS.BeastFill, COLORS.BeastOutline)
+    else
+        makeHighlight(character, COLORS.SurvivorFill, COLORS.SurvivorOutline)
+    end
+
+    local head = getCharacterHead(player)
+    if head and (not playerLabels[player] or playerLabels[player].Parent ~= head) then
+        safeDestroy(playerLabels[player])
+        local gui, label = makeBillboard(head, "FTF_Player_ESP", 180, 28, 3.2)
+        if gui then
+            label.Text = player.DisplayName .. "  (@" .. player.Name .. ")"
+            playerLabels[player] = gui
+        end
+    end
+end
+
+local function getCurrentMap()
+    local current = ReplicatedStorage:FindFirstChild("CurrentMap")
+    if current then
+        local value
+        pcall(function()
+            value = current.Value
+        end)
+        if typeof(value) == "Instance" then
+            return value
+        elseif value ~= nil then
+            return workspace:FindFirstChild(tostring(value))
+        end
+    end
+    return nil
+end
+
+local function getObjectPosition(object)
+    if object:IsA("BasePart") then
+        return object.Position
+    elseif object:IsA("Model") then
+        local part = object.PrimaryPart or object:FindFirstChildWhichIsA("BasePart", true)
+        return part and part.Position
+    end
+    return nil
+end
+
+local function getAnyBasePart(object)
+    if object:IsA("BasePart") then
+        return object
+    end
+    if object:IsA("Model") then
+        return object.PrimaryPart or object:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
+local function getPlayerActionProgress(player)
+    local stats = player and player:FindFirstChild("TempPlayerStatsModule")
+    if not stats then
+        return 0
+    end
+    local action = stats:FindFirstChild("ActionProgress")
+        or stats:FindFirstChild("DoorProgress")
+    if action and typeof(action.Value) == "number" then
+        return math.clamp(action.Value, 0, 1)
+    end
+    return 0
+end
+
+local function isRagdolled(player)
+    local stats = player and player:FindFirstChild("TempPlayerStatsModule")
+    local ragdoll = stats and stats:FindFirstChild("Ragdoll")
+    return ragdoll and ragdoll.Value == true
+end
+
+local function createGetUpTimer(player)
+    if getUpLabels[player] then
+        return
+    end
+    local head = getCharacterHead(player)
+    if not head then
+        return
+    end
+
+    local gui, label = makeBillboard(head, "FTF_GetUp_Timer", 110, 25, 4.1)
+    if gui then
+        label.Text = "27.7s"
+        getUpLabels[player] = gui
+    end
+end
+
+local function scanPlayers()
+    for target, highlight in pairs(highlights) do
+        if not target or not target.Parent then
+            safeDestroy(highlight)
+            highlights[target] = nil
+        end
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            if player.Character then
+                addPlayerVisuals(player)
+                if isRagdolled(player) then
+                    createGetUpTimer(player)
+                elseif getUpLabels[player] then
+                    safeDestroy(getUpLabels[player])
+                    getUpLabels[player] = nil
+                end
+            end
+        end
+    end
+end
+
+local function addWorldObject(object, category)
+    if not enabled or not object or not object.Parent then
+        return
+    end
+
+    if category == "computer" then
+        makeHighlight(object, COLORS.ComputerFill, COLORS.ComputerOutline)
+    elseif category == "exit" then
+        makeHighlight(object, COLORS.ExitFill, COLORS.ExitOutline)
+    elseif category == "doorTimer" then
+        makeHighlight(object, COLORS.DoorCloseFill, COLORS.DoorOutline)
+    end
+
+    if category == "doorTimer" and not doorData[object] then
+        local part = getAnyBasePart(object)
+        if part then
+            local gui, label = makeBillboard(part, "FTF_Door_Timer", 150, 26, 4)
+            if gui then
+                doorData[object] = {gui = gui, label = label, part = part}
+            end
+        end
+    elseif category == "computer" and not computerData[object] then
+        local part = getAnyBasePart(object)
+        if part then
+            local gui, label = makeBillboard(part, "FTF_Computer_Progress", 130, 24, 4)
+            if gui then
+                local barBack = Instance.new("Frame")
+                barBack.Name = "BarBack"
+                barBack.AnchorPoint = Vector2.new(0.5, 1)
+                barBack.Position = UDim2.new(0.5, 0, 1, 8)
+                barBack.Size = UDim2.fromOffset(100, 7)
+                barBack.BackgroundColor3 = Color3.fromRGB(15, 25, 35)
+                barBack.BackgroundTransparency = 0.3
+                barBack.BorderSizePixel = 0
+                barBack.Parent = gui
+                local corner = Instance.new("UICorner")
+                corner.CornerRadius = UDim.new(1, 0)
+                corner.Parent = barBack
+
+                local bar = Instance.new("Frame")
+                bar.Name = "Fill"
+                bar.Size = UDim2.fromScale(0, 1)
+                bar.BackgroundColor3 = COLORS.ComputerFill
+                bar.BackgroundTransparency = 0.2
+                bar.BorderSizePixel = 0
+                bar.Parent = barBack
+                local barCorner = Instance.new("UICorner")
+                barCorner.CornerRadius = UDim.new(1, 0)
+                barCorner.Parent = bar
+
+                computerData[object] = {
+                    gui = gui,
+                    label = label,
+                    bar = bar,
+                    progress = 0,
+                    completed = false
+                }
+            end
+        end
+    end
+end
+
+local function scanMapObjects()
+    local map = getCurrentMap()
+    local roots = {}
+    if map then
+        table.insert(roots, map)
+    else
+        table.insert(roots, workspace)
+    end
+
+    for _, root in ipairs(roots) do
+        for _, object in ipairs(root:GetDescendants()) do
+            if object.Name == "ComputerTable" then
+                addWorldObject(object, "computer")
+            elseif object.Name == "SingleDoor" or object.Name == "DoubleDoor" then
+                addWorldObject(object, "doorTimer")
+            elseif object.Name == "ExitDoor" or object.Name == "Exit" then
+                addWorldObject(object, "exit")
+            end
+        end
+    end
+end
+
+local function getComputerProgress(computer)
+    local maximum = 0
+    for _, part in ipairs(computer:GetChildren()) do
+        if part:IsA("BasePart") and part.Name:find("ComputerTrigger") then
+            local touching = {}
+            pcall(function()
+                touching = part:GetTouchingParts()
+            end)
+            for _, touchedPart in ipairs(touching) do
+                local character = touchedPart:FindFirstAncestorOfClass("Model")
+                local player = character and Players:GetPlayerFromCharacter(character)
+                if player then
+                    local progress = getPlayerActionProgress(player)
+                    if not isRagdolled(player) then
+                        maximum = math.max(maximum, progress)
+                    end
+                end
+            end
+        end
+    end
+    return math.clamp(maximum, 0, 1)
+end
+
+local function updateComputerProgress()
+    for computer, data in pairs(computerData) do
+        if not computer.Parent then
+            safeDestroy(data.gui)
+            computerData[computer] = nil
+        elseif not data.completed then
+            data.progress = math.max(data.progress, getComputerProgress(computer))
+            data.bar.Size = UDim2.new(data.progress, 0, 1, 0)
+            data.label.Text = string.format("COMPUTER %.0f%%", data.progress * 100)
+            if data.progress >= 0.999 then
+                data.completed = true
+                data.label.Text = "COMPLETED"
+                data.label.TextColor3 = COLORS.ComputerFill
+                data.bar.BackgroundColor3 = COLORS.ComputerFill
+            end
+        end
+    end
+end
+
+local function updateDoorTimers()
+    local localCharacter = LocalPlayer.Character
+    local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+
+    for door, data in pairs(doorData) do
+        if not door.Parent or not data.part or not data.part.Parent then
+            safeDestroy(data.gui)
+            doorData[door] = nil
+        else
+            local progress = 0
+            local inUse = false
+            local doorPosition = data.part.Position
+
+            for _, player in ipairs(Players:GetPlayers()) do
+                local character = player.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if root and (root.Position - doorPosition).Magnitude <= 13 then
+                    local value = getPlayerActionProgress(player)
+                    if value > 0 then
+                        progress = math.max(progress, value)
+                        inUse = true
+                    end
+                end
+            end
+
+            local trigger = door:FindFirstChild("DoorTrigger")
+            local actionSign = trigger and trigger:FindFirstChild("ActionSign")
+            if actionSign and actionSign.Value == 11 then
+                data.label.Text = "DOOR OPEN"
+                makeHighlight(door, COLORS.DoorOpenFill, COLORS.DoorOutline)
+            elseif inUse then
+                data.label.Text = string.format("OPENING %.0f%%", progress * 100)
+                makeHighlight(door, COLORS.DoorCloseFill, COLORS.DoorOutline)
+            else
+                data.label.Text = "DOOR CLOSED"
+                makeHighlight(door, COLORS.DoorCloseFill, COLORS.DoorOutline)
+            end
+        end
+    end
+end
+
+local function updateGetUpTimers(dt)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            if isRagdolled(player) then
+                createGetUpTimer(player)
+                local gui = getUpLabels[player]
+                local label = gui and gui:FindFirstChild("Text")
+                if label then
+                    local current = tonumber(label.Text:match("[%d%.]+")) or 27.7
+                    current = math.max(0, current - dt)
+                    label.Text = string.format("%.1fs", current)
+                end
+            elseif getUpLabels[player] then
+                safeDestroy(getUpLabels[player])
+                getUpLabels[player] = nil
+            end
+        end
+    end
+end
+
+local function createBeastSpawnLabel()
+    if beastSpawnLabel and beastSpawnLabel.Parent then
+        return
+    end
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "FTF_Beast_Spawn_Timer"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999999
+    gui.Parent = screenGui.Parent
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Timer"
+    label.AnchorPoint = Vector2.new(0.5, 0.5)
+    label.Position = UDim2.new(0.5, 0, 0.42, 0)
+    label.Size = UDim2.fromOffset(260, 55)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = COLORS.SurvivorFill
+    label.TextTransparency = TEXT_TRANSPARENCY
+    label.TextStrokeColor3 = Color3.fromRGB(5, 20, 35)
+    label.TextStrokeTransparency = 0.2
+    label.Font = Enum.Font.GothamBold
+    label.TextScaled = true
+    label.Visible = false
+    label.Parent = gui
+    beastSpawnLabel = gui
+    return label
+end
+
+local function updateBeastSpawnTimer(dt)
+    local label = createBeastSpawnLabel()
+    if not label then
+        return
+    end
+
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        label.Visible = false
+        lastLocalPosition = nil
+        beastSpawnActive = false
+        return
+    end
+
+    local stats = LocalPlayer:FindFirstChild("TempPlayerStatsModule")
+    local currentlyBeast = false
+    if stats then
+        local isBeastValue = stats:FindFirstChild("IsBeast")
+        if isBeastValue and isBeastValue.Value == true then
+            currentlyBeast = true
+        else
+            local ok, statsModule = pcall(require, stats)
+            if ok and type(statsModule) == "table" and statsModule.IsBeast == true then
+                currentlyBeast = true
+            end
+        end
+    end
+
+    if currentlyBeast then
+        label.Visible = false
+        beastSpawnActive = false
+        lastLocalPosition = root.Position
+        return
+    end
+
+    local position = root.Position
+    if lastLocalPosition and not beastSpawnActive then
+        if (position - lastLocalPosition).Magnitude > 20 then
+            beastSpawnActive = true
+            beastSpawnTime = 15
+            label.Visible = true
+        end
+    end
+    lastLocalPosition = position
+
+    if beastSpawnActive then
+        beastSpawnTime = math.max(0, beastSpawnTime - dt)
+        if beastSpawnTime > 0 then
+            label.Text = string.format("BEAST SPAWN: %.1fs", beastSpawnTime)
+            label.Visible = true
+        else
+            beastSpawnActive = false
+            beastSpawnMessageUntil = os.clock() + 3
+            label.Text = "THE BEAST IS HERE"
+            label.Visible = true
+        end
+    elseif os.clock() < beastSpawnMessageUntil then
+        label.Text = "THE BEAST IS HERE"
+        label.Visible = true
+    else
+        label.Visible = false
+    end
+end
+
+local function clearVisuals()
+    for target, h in pairs(highlights) do
+        safeDestroy(h)
+        highlights[target] = nil
+    end
+
+    for player, gui in pairs(playerLabels) do
+        safeDestroy(gui)
+        playerLabels[player] = nil
+    end
+
+    for player, gui in pairs(getUpLabels) do
+        safeDestroy(gui)
+        getUpLabels[player] = nil
+    end
+
+    for object, data in pairs(computerData) do
+        safeDestroy(data.gui)
+        computerData[object] = nil
+    end
+
+    for object, data in pairs(doorData) do
+        safeDestroy(data.gui)
+        doorData[object] = nil
+    end
+
+    safeDestroy(beastSpawnLabel)
+    beastSpawnLabel = nil
+    lastLocalPosition = nil
+    beastSpawnActive = false
+    beastSpawnTime = 0
+    beastSpawnMessageUntil = 0
+end
+
+local function enableAll()
+    if enabled or destroyed then
+        return
+    end
+    enabled = true
+
+    scanPlayers()
+    scanMapObjects()
+
+    if playerAddedConnection then
+        playerAddedConnection:Disconnect()
+    end
+    if playerRemovingConnection then
+        playerRemovingConnection:Disconnect()
+    end
+    playerAddedConnection = Players.PlayerAdded:Connect(function(player)
+        task.wait(0.7)
+        if enabled then
+            addPlayerVisuals(player)
+        end
+    end)
+    playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
+        removePlayerVisuals(player)
+    end)
+
+    if descendantAddedConnection then
+        descendantAddedConnection:Disconnect()
+    end
+    descendantAddedConnection = workspace.DescendantAdded:Connect(function(object)
+        if not enabled then
+            return
+        end
+        if object.Name == "ComputerTable" then
+            addWorldObject(object, "computer")
+        elseif object.Name == "SingleDoor" or object.Name == "DoubleDoor" then
+            addWorldObject(object, "doorTimer")
+        elseif object.Name == "ExitDoor" or object.Name == "Exit" then
+            addWorldObject(object, "exit")
+        end
+    end)
+
+    if updateConnection then
+        updateConnection:Disconnect()
+    end
+    local scanElapsed = 0
+    local objectUpdateElapsed = 0
+    updateConnection = RunService.Heartbeat:Connect(function(dt)
+        if not enabled then
+            return
+        end
+
+        scanElapsed = scanElapsed + dt
+        objectUpdateElapsed = objectUpdateElapsed + dt
+
+        if scanElapsed >= 0.8 then
+            scanElapsed = 0
+            scanPlayers()
+        end
+
+        updateGetUpTimers(dt)
+        updateBeastSpawnTimer(dt)
+
+        if objectUpdateElapsed >= 0.2 then
+            objectUpdateElapsed = 0
+            updateComputerProgress()
+            updateDoorTimers()
+        end
+    end)
+
+    toggleButton:SetAttribute("Enabled", true)
+end
+
+local function disableAll()
+    if not enabled then
+        return
+    end
+    enabled = false
+
+    if updateConnection then
+        updateConnection:Disconnect()
+        updateConnection = nil
+    end
+    if playerAddedConnection then
+        playerAddedConnection:Disconnect()
+        playerAddedConnection = nil
+    end
+    if playerRemovingConnection then
+        playerRemovingConnection:Disconnect()
+        playerRemovingConnection = nil
+    end
+    if descendantAddedConnection then
+        descendantAddedConnection:Disconnect()
+        descendantAddedConnection = nil
+    end
+
+    clearVisuals()
+    toggleButton:SetAttribute("Enabled", false)
+end
+
+toggleButton.Activated:Connect(function()
+    if enabled then
+        disableAll()
+    else
+        enableAll()
+    end
+end)
+
+-- Limpeza se a interface for removida pelo executor.
+screenGui.Destroying:Connect(function()
+    destroyed = true
+    disableAll()
+end)
+
+toggleButton:SetAttribute("Enabled", false)
